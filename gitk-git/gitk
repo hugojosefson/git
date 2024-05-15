@@ -2676,6 +2676,7 @@ proc makewindow {} {
         {mc "Create new branch" command mkbranch}
         {mc "Cherry-pick this commit" command cherrypick}
         {mc "Reset HEAD branch to here" command resethead}
+        {mc "Edit commit message" command edit_commit_message}
         {mc "Mark this commit" command markhere}
         {mc "Return to mark" command gotomark}
         {mc "Find descendant of this and mark" command find_common_desc}
@@ -9881,6 +9882,139 @@ proc resethead {} {
         nowbusy reset [mc "Resetting"]
         selbyid $rowmenuid
     }
+}
+
+# Load the current commit message based on the selected commit, using git log --format=%B -n 1 <commit>.
+# Use commit_message_editor_dialog to present the user with a with a multi-line text field to edit the commit message
+# of the selected commit. If the commit_message_editor_dialog returns an empty string, this function does nothing.
+#
+# If commit_message_editor_dialog returns a non-empty message different from the current commit message, this function
+# calls amend_commit_message to amend the commit message.
+proc edit_commit_message {} {
+  global mainhead rowmenuid oldcommitmessage newcommitmessage NS
+
+  set oldcommitmessage [exec git log --format=%B -n 1 $rowmenuid]
+  commit_message_editor_dialog
+  if {$newcommitmessage eq ""} return
+  if {$newcommitmessage eq $oldcommitmessage} return
+
+  amend_commit_message
+}
+
+proc amend_commit_message {} {
+  global mainhead rowmenuid oldcommitmessage newcommitmessage NS
+
+  # If $newcommitmessage is empty, this function does nothing.
+  if {$newcommitmessage eq ""} return
+
+  # If $newcommitmessage is not empty, but the new commit message is the same as the current commit message, this function does nothing.
+  if {$newcommitmessage eq $oldcommitmessage} return
+  
+  # Remember all branch names that currently point to the commit.
+  nowbusy remember_old_branches
+  set oldbranches [list]
+  foreach branch [exec git branch -l --points-at=$rowmenuid --format=%(refname:lstrip=2)] {
+    # skip the current branch, it will be rebased
+    if {$branch eq $mainhead} continue
+    lappend oldbranches $branch
+  }
+  notbusy remember_old_branches
+
+  # If it's dirty, stash, and remember whether it did stash or not.
+  nowbusy stash
+  set needed_to_stash 0
+  if {[is_dirty]} {
+    exec git add --all
+    exec git stash save
+    set needed_to_stash 1
+  }
+  notbusy stash
+
+  # Checks out $rowmenuid.
+  nowbusy amend
+  exec git checkout --detach --quiet $rowmenuid
+
+  # Amend the commit message.
+  exec git commit --amend -m $newcommitmessage
+  notbusy amend
+
+  # Get the new commit sha1.
+  nowbusy get_new_commit_sha
+  set newcommitsha1 [exec git rev-parse HEAD]
+  notbusy get_new_commit_sha
+
+  # Rebase $newcommitsha1 on top of $parentid.
+  nowbusy rebase
+  exec git checkout --force --quiet $mainhead
+  exec git -c advice.skippedCherryPicks=false rebase --quiet --update-refs --autostash $newcommitsha1
+  notbusy rebase
+
+  # Pop any stash.
+  if {$needed_to_stash} {
+    nowbusy pop_stash
+    exec git stash pop
+    notbusy pop_stash
+  }
+
+  # Force-push locally (git push . --force $newcommitsha1:$branchname $newcommitsha1:$branchname2 ...), the branch names that point to the commit. Only move them locally!
+  # Only push anything if $oldbranches is non-empty
+  if {$oldbranches ne ""} {
+    nowbusy push_branches [mc "Pushing remaining affected local branches"]
+    set pushcommandargs [list git push . --quiet --force]
+    foreach branch $oldbranches {
+      lappend pushcommandargs $newcommitsha1:$branch
+    }
+    exec {*}$pushcommandargs
+    notbusy push_branches
+  }
+
+  updatecommits
+}
+
+# checks both git diff --quiet and git diff --cached --quiet
+# returns 0 if either of them fails, 1 otherwise
+# returns 1 if both are successful, 0 otherwise
+proc is_dirty {} {
+  if {[catch {exec git diff --quiet} err] && [catch {exec git diff --cached --quiet} err]} {
+    return 1
+  }
+  return 0
+}
+
+# Copy $oldcommitmessage to global variablenewcommitmessage.
+# Present the user with a multi-line text field, filled in with $newcommitmessage, to edit newcommitmessage.
+# When the user clicks Save, call store_newcommitmessage_from_window_text_and_destory_window and return.
+# If the user clicks Cancel or the ESC key, set newcommitmessage to "", destroy the window and return.
+# Make no changes to git, or to the index.
+proc commit_message_editor_dialog {} {
+  global bgcolor oldcommitmessage newcommitmessage NS
+
+  set oldcommitmessage [string trim $oldcommitmessage]
+  set newcommitmessage ""
+  set w ".commitmessageeditor"
+  ttk_toplevel $w
+  make_transient $w .
+  wm title $w [mc "Edit Commit Message"]
+  ${NS}::label $w.m -text [mc "Edit the commit message:"]
+  pack $w.m -side top -fill x -padx 20 -pady 20
+  text $w.text -wrap word -height 10 -width 50 -background $bgcolor
+  $w.text insert 1.0 $oldcommitmessage
+  pack $w.text -side top -fill both -padx 20 -pady 10
+  ${NS}::button $w.save -text [mc "Save"] -command [list store_newcommitmessage_from_window_text_and_destory_window $w]
+  pack $w.save -side left -fill x -padx 20 -pady 20
+  ${NS}::button $w.cancel -text [mc "Cancel"] -command [list destroy $w]
+  bind $w <Key-Escape> [list destroy $w]
+  pack $w.cancel -side right -fill x -padx 20 -pady 20
+  bind $w <Visibility> "grab $w; focus $w"
+  tkwait window $w
+  set newcommitmessage [string trim $newcommitmessage]
+}
+
+proc store_newcommitmessage_from_window_text_and_destory_window {w} {
+  global newcommitmessage
+
+  set newcommitmessage [$w.text get 1.0 end]
+  destroy $w
 }
 
 proc readresetstat {fd} {
