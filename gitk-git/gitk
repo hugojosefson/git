@@ -2677,6 +2677,7 @@ proc makewindow {} {
         {mc "Cherry-pick this commit" command cherrypick}
         {mc "Reset HEAD branch to here" command resethead}
         {mc "Edit commit message" command edit_commit_message}
+        {mc "Cut/Split this commit on highlighted files" command cut_commit}
         {mc "Mark this commit" command markhere}
         {mc "Return to mark" command gotomark}
         {mc "Find descendant of this and mark" command find_common_desc}
@@ -8987,6 +8988,7 @@ proc mstime {} {
 proc rowmenu {x y id} {
     global rowctxmenu selectedline rowmenuid curview
     global nullid nullid2 fakerowmenu mainhead markedid
+    global highlight_files
 
     stopfinding
     set rowmenuid $id
@@ -9010,6 +9012,12 @@ proc rowmenu {x y id} {
         $menu entryconfigure 10 -state $mstate
         $menu entryconfigure 11 -state $mstate
         $menu entryconfigure 12 -state $mstate
+
+        if {[llength $highlight_files] > 0} {
+            $menu entryconfigure [mca "Cut/Split this commit on highlighted files"] -state normal
+        } else {
+            $menu entryconfigure [mca "Cut/Split this commit on highlighted files"] -state disabled
+        }
     } else {
         set menu $fakerowmenu
     }
@@ -9842,6 +9850,39 @@ proc revert {} {
     notbusy revert
 }
 
+# Use the existing `git cut` command to split the right-clicked commit into two commits.
+# The first argument to the `git cut` command, is the ref of the commit to split.
+# The following argument(s) to the `git cut` command, are the file paths to split into a new commit.
+# Use the (space separated) list of file paths from the existing global highlight_files.
+# The `git cut` command will create a new commit with the commit message of the original commit.
+# The `git cut` command is quite verbose, so collect the output and only show it if `git cut` exits with a non-zero status. If `git cut` exits with a zero status, do not show the output.
+# Always refresh the commit list after `git cut` is run, no matter if it exits with a zero status or not.
+proc cut_commit {} {
+    global rowmenuid highlight_files
+    set commit $rowmenuid
+    set files [split $highlight_files]
+    if {[llength $files] == 0} {
+        error_popup [mc "No files selected"]
+        return
+    }
+
+    # Construct the git cut command
+    set cmd [list git cut $commit]
+    lappend cmd {*}$files
+
+    # Execute the git cut command and capture its output
+    if {[catch {exec {*}$cmd 2>@1} result options]} {
+        # Command failed, show the error message including the command output
+        set exitcode [lindex [dict get $options -errorcode] 2]
+        error_popup "Git cut failed with exit code $exitcode:\n$result"
+    } else {
+        # Command succeeded, don't show any output
+    }
+
+    # Refresh the commit list
+    after idle updatecommits
+}
+
 proc resethead {} {
     global mainhead rowmenuid confirm_ok resettype NS
 
@@ -9968,7 +10009,7 @@ proc amend_commit_message {} {
     notbusy push_branches
   }
 
-  updatecommits
+  after idle updatecommits
 }
 
 # checks both git diff --quiet and git diff --cached --quiet
